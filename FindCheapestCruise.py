@@ -294,7 +294,7 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
             'query cruiseSearch_Cruises($filters: String) {'
             'cruiseSearch(filters: $filters) {'
             'results {cruises {id sailings {sailDate '
-            'itinerary { code } '
+            'itinerary { code description } '
             'stateroomClassPricing {'
             'price {value currency { code }} '
             'stateroomClass {id name content { code }}'
@@ -324,20 +324,26 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
         nights = _nights_from_package_code(package_code)
         for sailing in cruise.get("sailings", []):
             sail_date = sailing.get("sailDate", "").replace("-", "")
+            itinerary_obj = sailing.get("itinerary") or {}
             # itinerary.code is the stable booking identifier (e.g. "RD04W214")
-            itinerary_code = (sailing.get("itinerary") or {}).get("code") or package_code.split("-")[0]
+            itinerary_code = itinerary_obj.get("code") or package_code.split("-")[0]
+            description = itinerary_obj.get("description") or ""
             for stateroom in sailing.get("stateroomClassPricing", []):
                 price_info = stateroom.get("price")
                 if price_info is None:
                     continue
                 cc = stateroom["stateroomClass"]["content"]["code"]
                 ct = stateroom["stateroomClass"]["name"]
+                # Client-side cabin class filter — the API returns all classes
+                if cabinClass and cc != cabinClass:
+                    continue
                 ppp = float(price_info["value"])
                 total = round(ppp * (numAdults + numChildren), 2)
                 results.append({
                     'sailDate': sail_date,
                     'packageCode': package_code,
                     'bookingCode': itinerary_code,
+                    'description': description,
                     'cabinClass': cc,
                     'cabinType': ct,
                     'pricePerPerson': ppp,
@@ -349,28 +355,43 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
 
 
 ##########
-# Search all ships for cheapest cruise
+# Collect results (pure data — no printing)
 
-def findCheapestCruises(
+def collectCruiseResults(
     numAdults=4,
     numChildren=0,
     currency='USD',
     cabinClass=None,
     fromDate=None,
     toDate=None,
-    topN=10,
     shipCode=None,
     minNights=None,
     maxNights=None,
     minShipClass=None,
+    status_callback=None,   # callable(msg: str) for progress reporting
+    ships_override=None,    # pre-fetched ship list (avoids extra API call)
 ):
+    """
+    Fetch all matching sailings and return a sorted list of result dicts.
+    Each dict contains: sailDate, packageCode, bookingCode, cabinClass, cabinType,
+    pricePerPerson, totalPrice, currency, nights, shipCode, shipName.
+
+    status_callback(msg) is called with progress strings so callers (CLI or
+    Streamlit) can display them however they like.
+    """
+    def _log(msg):
+        if status_callback:
+            status_callback(msg)
+
     today = datetime.today()
     if fromDate is None:
         fromDate = today.strftime("%Y-%m-%d")
     if toDate is None:
         toDate = (today + timedelta(days=365)).strftime("%Y-%m-%d")
 
-    if shipCode:
+    if ships_override is not None:
+        ships = ships_override
+    elif shipCode:
         ships = [{'code': shipCode, 'name': shipCode, 'shipClass': get_ship_class(shipCode)}]
         # Resolve real name
         all_ships = getShips()
@@ -379,21 +400,20 @@ def findCheapestCruises(
                 ships = [s]
                 break
     else:
-        print("Fetching ship list...")
+        _log("Fetching ship list...")
         ships = getShips(brand="royal")
 
     # Apply minimum ship class filter
-    min_class_rank = None
     if minShipClass:
         min_class_rank = SHIP_CLASS_RANK.get(minShipClass.upper())
         if min_class_rank is None:
-            print(f"Warning: unknown ship class '{minShipClass}'. Valid classes: "
-                  + ", ".join(SHIP_CLASS_RANK.keys()))
+            _log(f"Warning: unknown ship class '{minShipClass}'. Valid classes: "
+                 + ", ".join(SHIP_CLASS_RANK.keys()))
         else:
             before = len(ships)
             ships = [s for s in ships if ship_class_rank(s['code']) >= min_class_rank]
-            print(f"Filtered to {len(ships)} ship(s) with class >= {minShipClass.upper()} "
-                  f"(removed {before - len(ships)})")
+            _log(f"Filtered to {len(ships)} ship(s) with class >= {minShipClass.upper()} "
+                 f"(removed {before - len(ships)})")
 
     nights_filter = ""
     if minNights is not None and maxNights is not None:
@@ -405,31 +425,32 @@ def findCheapestCruises(
 
     class_filter = f", class >= {minShipClass.upper()}" if minShipClass else ""
 
-    print(f"Searching {len(ships)} ship(s) for cheapest cruises for {numAdults} adults"
-          + (f" + {numChildren} children" if numChildren else "")
-          + f" ({currency})"
-          + (f" in {cabinClass}" if cabinClass else "")
-          + nights_filter
-          + class_filter
-          + f" between {fromDate} and {toDate}")
-    print("")
+    _log(
+        f"Searching {len(ships)} ship(s) for cheapest cruises for {numAdults} adults"
+        + (f" + {numChildren} children" if numChildren else "")
+        + f" ({currency})"
+        + (f" in {cabinClass}" if cabinClass else "")
+        + nights_filter
+        + class_filter
+        + f" between {fromDate} and {toDate}"
+    )
 
     all_results = []
 
     for ship in ships:
         sc = ship['code']
         sn = ship['name']
-        print(f"  Searching {sn} ({sc})...", end=" ", flush=True)
+        _log(f"Searching {sn} ({sc})...")
 
         voyages = getVoyagesWithPackageCodes(
             sc, fromDate, toDate, numAdults, numChildren, currency, cabinClass
         )
 
         if not voyages:
-            print("no results")
+            _log(f"  {sn}: no results")
             continue
 
-        # Find cheapest cabin class per sailing date
+        # Find cheapest cabin class per (sailDate, packageCode) key
         best_by_date = {}
         for v in voyages:
             if minNights is not None and (v.get('nights') is None or v['nights'] < minNights):
@@ -445,14 +466,60 @@ def findCheapestCruises(
             entry['shipName'] = sn
             all_results.append(entry)
 
-        print(f"{len(best_by_date)} sailing(s) found")
+        _log(f"  {sn}: {len(best_by_date)} sailing(s) found")
+
+    # Sort by total price ascending
+    all_results.sort(key=lambda x: x['totalPrice'])
+    return all_results
+
+
+def _make_booking_url(r, numAdults, numChildren):
+    """Build the Royal Caribbean booking URL for a result dict."""
+    sail_dt = r['sailDate']
+    booking_date = (f"{sail_dt[0:4]}-{sail_dt[4:6]}-{sail_dt[6:8]}"
+                    if len(sail_dt) == 8 else sail_dt)
+    booking_package_code = r.get('bookingCode') or r['packageCode'].split('-')[0]
+    return (
+        f"https://www.royalcaribbean.com/room-selection/rooms-and-guests"
+        f"?packageCode={booking_package_code}&sailDate={booking_date}"
+        f"&country=USA&selectedCurrencyCode={r['currency']}&shipCode={r['shipCode']}"
+        f"&cabinClassType={r['cabinClass']}&r0a={numAdults}&r0c={numChildren}"
+    )
+
+
+##########
+# Search all ships for cheapest cruise (CLI display)
+
+def findCheapestCruises(
+    numAdults=4,
+    numChildren=0,
+    currency='USD',
+    cabinClass=None,
+    fromDate=None,
+    toDate=None,
+    topN=10,
+    shipCode=None,
+    minNights=None,
+    maxNights=None,
+    minShipClass=None,
+):
+    all_results = collectCruiseResults(
+        numAdults=numAdults,
+        numChildren=numChildren,
+        currency=currency,
+        cabinClass=cabinClass,
+        fromDate=fromDate,
+        toDate=toDate,
+        shipCode=shipCode,
+        minNights=minNights,
+        maxNights=maxNights,
+        minShipClass=minShipClass,
+        status_callback=lambda msg: print(msg),
+    )
 
     if not all_results:
         print("\nNo cruises found matching your criteria.")
         return
-
-    # Sort by total price ascending
-    all_results.sort(key=lambda x: x['totalPrice'])
 
     print(f"\n{'='*70}")
     print(f"  TOP {topN} CHEAPEST CRUISES FOR {numAdults} ADULTS"
@@ -472,23 +539,16 @@ def findCheapestCruises(
 
         nights_str = f"{r['nights']}nt" if r.get('nights') else "?nt"
         ship_cls = get_ship_class(r['shipCode']) or "?"
+        desc = r.get('description') or ''
         print(
             f"  #{shown+1:>3}  {display_date}  {r['shipName']:<35}"
             f"  [{ship_cls:<12}]  {r['cabinType']:<20}"
             f"  {nights_str:>4}  {r['totalPrice']:>10.2f} {r['currency']}"
             f"  ({r['pricePerPerson']:.2f}/person)"
         )
-        booking_date = sail_dt
-        if len(booking_date) == 8:
-            booking_date = f"{booking_date[0:4]}-{booking_date[4:6]}-{booking_date[6:8]}"
-        # Use itinerary.code as the stable booking identifier
-        booking_package_code = r.get('bookingCode') or r['packageCode'].split('-')[0]
-        print(
-            f"         Book at: https://www.royalcaribbean.com/room-selection/rooms-and-guests"
-            f"?packageCode={booking_package_code}&sailDate={booking_date}"
-            f"&country=USA&selectedCurrencyCode={r['currency']}&shipCode={r['shipCode']}"
-            f"&cabinClassType={r['cabinClass']}&r0a={numAdults}&r0c={numChildren}"
-        )
+        if desc:
+            print(f"         {desc}")
+        print(f"         Book at: {_make_booking_url(r, numAdults, numChildren)}")
         shown += 1
 
     if shown == 0:
