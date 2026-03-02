@@ -21,6 +21,72 @@ MOBILE_HEADERS = {
     'user-agent': 'okhttp/4.10.0',
 }
 
+# Ship class hierarchy ordered from smallest (0) to largest (7).
+# Source: 2025 Royal Caribbean Fleet Guide
+SHIP_CLASS_RANK = {
+    'VISION':        0,
+    'RADIANCE':      1,
+    'VOYAGER':       2,
+    'FREEDOM':       3,
+    'QUANTUM':       4,
+    'QUANTUM ULTRA': 5,
+    'OASIS':         6,
+    'ICON':          7,
+}
+
+# Map each ship code to its class name (upper-case key into SHIP_CLASS_RANK)
+SHIP_CODE_TO_CLASS = {
+    # Icon class
+    'IC':  'ICON',         # Icon of the Seas
+    'ST':  'ICON',         # Star of the Seas
+    'LG':  'ICON',         # Legend of the Seas (new)
+    # Oasis class
+    'OA':  'OASIS',        # Oasis of the Seas
+    'AL':  'OASIS',        # Allure of the Seas
+    'HA':  'OASIS',        # Harmony of the Seas
+    'SY':  'OASIS',        # Symphony of the Seas
+    'WN':  'OASIS',        # Wonder of the Seas
+    'UT':  'OASIS',        # Utopia of the Seas
+    # Quantum Ultra class
+    'OY':  'QUANTUM ULTRA',  # Odyssey of the Seas
+    'SP':  'QUANTUM ULTRA',  # Spectrum of the Seas
+    # Quantum class
+    'QN':  'QUANTUM',      # Quantum of the Seas
+    'AN':  'QUANTUM',      # Anthem of the Seas
+    'OV':  'QUANTUM',      # Ovation of the Seas
+    # Freedom class
+    'FO':  'FREEDOM',      # Freedom of the Seas
+    'LB':  'FREEDOM',      # Liberty of the Seas
+    'IN':  'FREEDOM',      # Independence of the Seas
+    # Voyager class
+    'VO':  'VOYAGER',      # Voyager of the Seas
+    'EX':  'VOYAGER',      # Explorer of the Seas
+    'AD':  'VOYAGER',      # Adventure of the Seas
+    'NA':  'VOYAGER',      # Navigator of the Seas
+    'MA':  'VOYAGER',      # Mariner of the Seas
+    # Radiance class
+    'RD':  'RADIANCE',     # Radiance of the Seas
+    'BR':  'RADIANCE',     # Brilliance of the Seas
+    'SR':  'RADIANCE',     # Serenade of the Seas
+    'JW':  'RADIANCE',     # Jewel of the Seas
+    # Vision class
+    'GR':  'VISION',       # Grandeur of the Seas
+    'RH':  'VISION',       # Rhapsody of the Seas
+    'EN':  'VISION',       # Enchantment of the Seas
+    'VI':  'VISION',       # Vision of the Seas
+}
+
+
+def get_ship_class(ship_code):
+    """Return the class name for a ship code, or None if unknown."""
+    return SHIP_CODE_TO_CLASS.get(ship_code.upper() if ship_code else '')
+
+
+def ship_class_rank(ship_code):
+    """Return the numeric rank of a ship's class (higher = larger). Unknown ships return -1."""
+    cls = get_ship_class(ship_code)
+    return SHIP_CLASS_RANK.get(cls, -1) if cls else -1
+
 ##########
 # Get Ships
 
@@ -45,7 +111,12 @@ def getShips(brand="royal"):
             continue
         if brand == "royal" and ship.get("name", "").startswith("Celebrity"):
             continue
-        ships.append({'code': ship.get("shipCode"), 'name': ship.get("name")})
+        code = ship.get("shipCode")
+        ships.append({
+            'code': code,
+            'name': ship.get("name"),
+            'shipClass': get_ship_class(code),
+        })
     return ships
 
 
@@ -222,7 +293,9 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
         'query': (
             'query cruiseSearch_Cruises($filters: String) {'
             'cruiseSearch(filters: $filters) {'
-            'results {cruises {id sailings {sailDate stateroomClassPricing {'
+            'results {cruises {id sailings {sailDate '
+            'itinerary { code } '
+            'stateroomClassPricing {'
             'price {value currency { code }} '
             'stateroomClass {id name content { code }}'
             '}}}}}}'  
@@ -251,6 +324,8 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
         nights = _nights_from_package_code(package_code)
         for sailing in cruise.get("sailings", []):
             sail_date = sailing.get("sailDate", "").replace("-", "")
+            # itinerary.code is the stable booking identifier (e.g. "RD04W214")
+            itinerary_code = (sailing.get("itinerary") or {}).get("code") or package_code.split("-")[0]
             for stateroom in sailing.get("stateroomClassPricing", []):
                 price_info = stateroom.get("price")
                 if price_info is None:
@@ -262,6 +337,7 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
                 results.append({
                     'sailDate': sail_date,
                     'packageCode': package_code,
+                    'bookingCode': itinerary_code,
                     'cabinClass': cc,
                     'cabinType': ct,
                     'pricePerPerson': ppp,
@@ -286,6 +362,7 @@ def findCheapestCruises(
     shipCode=None,
     minNights=None,
     maxNights=None,
+    minShipClass=None,
 ):
     today = datetime.today()
     if fromDate is None:
@@ -294,7 +371,7 @@ def findCheapestCruises(
         toDate = (today + timedelta(days=365)).strftime("%Y-%m-%d")
 
     if shipCode:
-        ships = [{'code': shipCode, 'name': shipCode}]
+        ships = [{'code': shipCode, 'name': shipCode, 'shipClass': get_ship_class(shipCode)}]
         # Resolve real name
         all_ships = getShips()
         for s in all_ships:
@@ -305,6 +382,19 @@ def findCheapestCruises(
         print("Fetching ship list...")
         ships = getShips(brand="royal")
 
+    # Apply minimum ship class filter
+    min_class_rank = None
+    if minShipClass:
+        min_class_rank = SHIP_CLASS_RANK.get(minShipClass.upper())
+        if min_class_rank is None:
+            print(f"Warning: unknown ship class '{minShipClass}'. Valid classes: "
+                  + ", ".join(SHIP_CLASS_RANK.keys()))
+        else:
+            before = len(ships)
+            ships = [s for s in ships if ship_class_rank(s['code']) >= min_class_rank]
+            print(f"Filtered to {len(ships)} ship(s) with class >= {minShipClass.upper()} "
+                  f"(removed {before - len(ships)})")
+
     nights_filter = ""
     if minNights is not None and maxNights is not None:
         nights_filter = f", {minNights}–{maxNights} nights"
@@ -313,11 +403,14 @@ def findCheapestCruises(
     elif maxNights is not None:
         nights_filter = f", <= {maxNights} nights"
 
+    class_filter = f", class >= {minShipClass.upper()}" if minShipClass else ""
+
     print(f"Searching {len(ships)} ship(s) for cheapest cruises for {numAdults} adults"
           + (f" + {numChildren} children" if numChildren else "")
           + f" ({currency})"
           + (f" in {cabinClass}" if cabinClass else "")
           + nights_filter
+          + class_filter
           + f" between {fromDate} and {toDate}")
     print("")
 
@@ -378,18 +471,21 @@ def findCheapestCruises(
             display_date = sail_dt
 
         nights_str = f"{r['nights']}nt" if r.get('nights') else "?nt"
+        ship_cls = get_ship_class(r['shipCode']) or "?"
         print(
             f"  #{shown+1:>3}  {display_date}  {r['shipName']:<35}"
-            f"  {r['cabinType']:<20}"
+            f"  [{ship_cls:<12}]  {r['cabinType']:<20}"
             f"  {nights_str:>4}  {r['totalPrice']:>10.2f} {r['currency']}"
             f"  ({r['pricePerPerson']:.2f}/person)"
         )
         booking_date = sail_dt
         if len(booking_date) == 8:
             booking_date = f"{booking_date[0:4]}-{booking_date[4:6]}-{booking_date[6:8]}"
+        # Use itinerary.code as the stable booking identifier
+        booking_package_code = r.get('bookingCode') or r['packageCode'].split('-')[0]
         print(
             f"         Book at: https://www.royalcaribbean.com/room-selection/rooms-and-guests"
-            f"?packageCode={r['packageCode']}&sailDate={booking_date}"
+            f"?packageCode={booking_package_code}&sailDate={booking_date}"
             f"&country=USA&selectedCurrencyCode={r['currency']}&shipCode={r['shipCode']}"
             f"&cabinClassType={r['cabinClass']}&r0a={numAdults}&r0c={numChildren}"
         )
@@ -478,6 +574,18 @@ def main():
         help='Maximum number of nights (e.g. 10 to exclude long cruises)',
     )
     parser.add_argument(
+        '--min-ship-class',
+        type=str,
+        default=None,
+        metavar='CLASS',
+        choices=[c.replace(' ', '-') for c in SHIP_CLASS_RANK.keys()],
+        help=(
+            'Minimum ship class to include. Ordered smallest to largest: '
+            + ' < '.join(SHIP_CLASS_RANK.keys())
+            + '. Use hyphen for multi-word classes (e.g. QUANTUM-ULTRA).'
+        ),
+    )
+    parser.add_argument(
         '--date-format',
         type=str,
         default=None,
@@ -490,6 +598,8 @@ def main():
     if args.date_format:
         dateDisplayFormat = args.date_format
 
+    min_ship_class = args.min_ship_class.replace('-', ' ') if args.min_ship_class else None
+
     findCheapestCruises(
         numAdults=args.adults,
         numChildren=args.children,
@@ -501,6 +611,7 @@ def main():
         shipCode=args.ship,
         minNights=args.min_nights,
         maxNights=args.max_nights,
+        minShipClass=min_ship_class,
     )
 
 
