@@ -14,6 +14,7 @@ from FindCheapestCruise import (
     getShips,
     get_ship_class,
     SHIP_CLASS_RANK,
+    PORT_CODE_TO_NAME,
     _make_booking_url,
 )
 
@@ -142,53 +143,83 @@ if not results:
     st.warning("No cruises found matching your criteria.")
     st.stop()
 
+# ── Post-search filters ───────────────────────────────────────────────────────
+
+# Departure port multiselect — populated from actual search results so the user
+# only sees ports that have sailings.  Defaults to all ports selected.
+_all_ports = sorted({r.get('departurePort') for r in results if r.get('departurePort')})
+st.sidebar.markdown("---")
+st.sidebar.subheader("Filter Results")
+selected_ports = st.sidebar.multiselect(
+    "Departure Port",
+    options=_all_ports,
+    default=_all_ports,
+    format_func=lambda p: f"{p} — {PORT_CODE_TO_NAME.get(p, p)}",
+    help="Narrows the chart and table without re-running the search.",
+)
+
+filtered_results = [
+    r for r in results
+    if not selected_ports or r.get('departurePort') in selected_ports
+]
+
+if not filtered_results:
+    st.warning("No sailings match the selected departure port(s).")
+    st.stop()
+
 # ── Build pivot for heatmap ───────────────────────────────────────────────────
 
-df = pd.DataFrame(results)
+df = pd.DataFrame(filtered_results)
 
 # Parse sail dates to real dates
 df["sailDateParsed"] = pd.to_datetime(df["sailDate"], format="%Y%m%d")
 df["nights"] = df["nights"].fillna(0).astype(int)
 
-# For each (sailDate, nights) cell keep the cheapest total price
+# Bucket each sailing into the Monday-starting week for wider, cleaner cells
+df["sailWeek"] = df["sailDateParsed"] - pd.to_timedelta(df["sailDateParsed"].dt.dayofweek, unit="D")
+
+# For each (sailWeek, nights) cell keep the cheapest total price
 pivot_src = (
-    df.groupby(["sailDateParsed", "nights"])
-    .agg(
-        totalPrice=("totalPrice", "min"),
-        # Collect details for hover: cheapest entry per cell
-    )
+    df.groupby(["sailWeek", "nights"])
+    .agg(totalPrice=("totalPrice", "min"))
     .reset_index()
 )
 
-# Build a hover-detail map: (date, nights) → list of ship+cabin info
+# Build a hover-detail map: (week, nights) → list of individual sailing info
 hover_details: dict[tuple, list[str]] = {}
 for _, row in df.iterrows():
-    key = (row["sailDateParsed"], row["nights"])
+    key = (row["sailWeek"], row["nights"])
+    sail_date_str = row["sailDateParsed"].strftime("%b %-d")
     desc_part = f" — {row['description']}" if row.get('description') else ""
-    entry = f"{row['shipName']} · {row['cabinType']} · {row['totalPrice']:,.0f} {row['currency']}{desc_part}"
+    port_code = row.get('departurePort') or ''
+    port_part = f" · Dep: {PORT_CODE_TO_NAME.get(port_code, port_code)}" if port_code else ""
+    entry = (
+        f"{sail_date_str}  {row['shipName']} · {row['cabinType']} · "
+        f"{row['totalPrice']:,.0f} {row['currency']}{port_part}{desc_part}"
+    )
     hover_details.setdefault(key, [])
     if entry not in hover_details[key]:
         hover_details[key].append(entry)
 
-# Full date axis (every date in range so grid is continuous)
-all_dates = pd.date_range(df["sailDateParsed"].min(), df["sailDateParsed"].max(), freq="D")
+# Full week axis (every Monday in range so the grid has no time gaps)
+all_weeks = pd.date_range(df["sailWeek"].min(), df["sailWeek"].max(), freq="W-MON")
 all_nights = sorted(df["nights"].unique())
 
-# Build 2-D grid: rows=nights, cols=dates
-price_grid = pd.DataFrame(index=all_nights, columns=all_dates, dtype=float)
-hover_grid = pd.DataFrame(index=all_nights, columns=all_dates, dtype=object)
+# Build 2-D grid: rows=nights, cols=weeks
+price_grid = pd.DataFrame(index=all_nights, columns=all_weeks, dtype=float)
+hover_grid = pd.DataFrame(index=all_nights, columns=all_weeks, dtype=object)
 
 for _, row in pivot_src.iterrows():
-    d = row["sailDateParsed"]
+    w = row["sailWeek"]
     n = row["nights"]
-    price_grid.at[n, d] = row["totalPrice"]
-    details = hover_details.get((d, n), [])
-    hover_grid.at[n, d] = "<br>".join(details)
+    price_grid.at[n, w] = row["totalPrice"]
+    details = hover_details.get((w, n), [])
+    hover_grid.at[n, w] = "<br>".join(details)
 
 z_values = price_grid.values.tolist()
 hover_text = hover_grid.values.tolist()
 
-date_labels = [d.strftime("%b %-d '%y") for d in all_dates]
+date_labels = [d.strftime("%b %-d '%y") for d in all_weeks]
 night_labels = [f"{n}n" for n in all_nights]
 
 # Clamp color scale to 5th–95th percentile so outlier suite prices don't
@@ -217,7 +248,7 @@ fig = go.Figure(
         hoverongaps=False,
         text=hover_text,
         hovertemplate=(
-            "<b>%{x}</b> &nbsp;|&nbsp; <b>%{y}</b><br>"
+            "Week of <b>%{x}</b> &nbsp;|&nbsp; <b>%{y}</b><br>"
             "Cheapest: <b>%{z:,.0f} " + params["currency"] + "</b><br>"
             "%{text}<extra></extra>"
         ),
@@ -235,7 +266,7 @@ fig.update_layout(
         ),
         font_size=16,
     ),
-    xaxis=dict(title="Sail Date", tickangle=-45, tickfont_size=10),
+    xaxis=dict(title="Week of Sail Date", tickangle=-45, tickfont_size=10),
     yaxis=dict(title="Duration (nights)", autorange="reversed"),
     height=max(400, 60 * len(all_nights) + 150),
     margin=dict(l=60, r=40, t=60, b=100),
@@ -245,27 +276,33 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ── Results table ─────────────────────────────────────────────────────────────
 
-st.subheader(f"All Results ({len(results)} sailings)")
+_port_note = (
+    f" — {len(results)} total before port filter"
+    if len(filtered_results) != len(results) else ""
+)
+st.subheader(f"All Results ({len(filtered_results)} sailings{_port_note})")
 
 table_rows = []
-for r in results:
+for r in filtered_results:
     sail_dt = r["sailDate"]
     try:
         display_date = datetime.strptime(sail_dt, "%Y%m%d").strftime("%m/%d/%Y")
     except Exception:
         display_date = sail_dt
 
+    port_code = r.get("departurePort") or ""
     table_rows.append({
-        "Sail Date":     display_date,
-        "Ship":          r["shipName"],
-        "Class":         get_ship_class(r["shipCode"]) or "?",
-        "Destination":   r.get("description") or "",
-        "Cabin":         r["cabinType"],
-        "Nights":        r.get("nights") or "?",
-        "Total Price":   r["totalPrice"],
-        "Per Person":    r["pricePerPerson"],
-        "Currency":      r["currency"],
-        "Book":          _make_booking_url(r, params["numAdults"], params["numChildren"]),
+        "Sail Date":      display_date,
+        "Ship":           r["shipName"],
+        "Class":          get_ship_class(r["shipCode"]) or "?",
+        "Destination":    r.get("description") or "",
+        "Cabin":          r["cabinType"],
+        "Nights":         r.get("nights") or "?",
+        "Departure Port": PORT_CODE_TO_NAME.get(port_code, port_code) if port_code else "",
+        "Total Price":    r["totalPrice"],
+        "Per Person":     r["pricePerPerson"],
+        "Currency":       r["currency"],
+        "Book":           _make_booking_url(r, params["numAdults"], params["numChildren"]),
     })
 
 table_df = pd.DataFrame(table_rows)

@@ -13,6 +13,58 @@ def _nights_from_package_code(package_code):
     m = re.match(r'^[A-Z]{2}(\d+)', package_code)
     return int(m.group(1)) if m else None
 
+
+def _port_from_package_code(package_code):
+    """Extract 3-letter departure port code from a package code like 'AD06FLL-...' -> 'FLL'."""
+    if not package_code:
+        return None
+    m = re.match(r'^[A-Z]{2}\d+([A-Z]{2,4})', package_code)
+    return m.group(1) if m else None
+
+
+# Known Royal Caribbean departure port codes -> human-readable names.
+# Package codes embed a 3-4 letter port code (e.g. FLL, MIA, GAL).
+PORT_CODE_TO_NAME = {
+    'FLL': 'Fort Lauderdale, FL',
+    'MIA': 'Miami, FL',
+    'ORL': 'Port Canaveral (Orlando), FL',
+    'TPA': 'Tampa, FL',
+    'JAX': 'Jacksonville, FL',
+    'GAL': 'Galveston, TX',
+    'NOS': 'New Orleans, LA',
+    'BAL': 'Baltimore, MD',
+    'NWK': 'Cape Liberty (Bayonne), NJ',
+    'BOS': 'Boston, MA',
+    'SEA': 'Seattle, WA',
+    'VAN': 'Vancouver, BC',
+    'ANC': 'Seward (Anchorage), AK',
+    'SJU': 'San Juan, PR',
+    'SYD': 'Sydney, Australia',
+    'BCN': 'Barcelona, Spain',
+    'ROM': 'Rome (Civitavecchia), Italy',
+    'ATH': 'Athens (Piraeus), Greece',
+    'COP': 'Copenhagen, Denmark',
+    'AMS': 'Amsterdam, Netherlands',
+    'SHI': 'Shanghai, China',
+    'BYI': 'Baltimore, MD',
+    'BYE': 'Cape Liberty (New York), NJ',
+    'ONX': 'Colón, Panama',
+    'YVR': 'Vancouver, BC',
+    'SIN': 'Singapore, Singapore',
+    'SAN': 'San Diego, CA',
+    'LAX': 'Los Angeles, CA',
+    'MSY': 'New Orleans, LA',
+    'PCP': 'Port Canaveral (Orlando), FL',
+    'BWI': 'Baltimore, MD',
+    'CTG': 'Cartagena, Colombia',
+    'HKG': 'Hong Kong, China',
+    'BNE': 'Brisbane, Australia',
+    'BAO': 'Shanghai (Baoshan), China',
+    'HNL': 'Honolulu, HI',
+    'STH': 'Southampton, England',
+    'SWD': 'Seward, AK',
+}
+
 MOBILE_HEADERS = {
     'appkey': 'cdCNc04srNq4rBvKofw1aC50dsdSaPuc',
     'accept': 'application/json',
@@ -43,26 +95,26 @@ SHIP_CODE_TO_CLASS = {
     # Oasis class
     'OA':  'OASIS',        # Oasis of the Seas
     'AL':  'OASIS',        # Allure of the Seas
-    'HA':  'OASIS',        # Harmony of the Seas
+    'HM':  'OASIS',        # Harmony of the Seas
     'SY':  'OASIS',        # Symphony of the Seas
     'WN':  'OASIS',        # Wonder of the Seas
     'UT':  'OASIS',        # Utopia of the Seas
     # Quantum Ultra class
     'OY':  'QUANTUM ULTRA',  # Odyssey of the Seas
-    'SP':  'QUANTUM ULTRA',  # Spectrum of the Seas
+    'SC':  'QUANTUM ULTRA',  # Spectrum of the Seas
     # Quantum class
     'QN':  'QUANTUM',      # Quantum of the Seas
     'AN':  'QUANTUM',      # Anthem of the Seas
     'OV':  'QUANTUM',      # Ovation of the Seas
     # Freedom class
-    'FO':  'FREEDOM',      # Freedom of the Seas
+    'FR':  'FREEDOM',      # Freedom of the Seas
     'LB':  'FREEDOM',      # Liberty of the Seas
     'IN':  'FREEDOM',      # Independence of the Seas
     # Voyager class
-    'VO':  'VOYAGER',      # Voyager of the Seas
+    'VY':  'VOYAGER',      # Voyager of the Seas
     'EX':  'VOYAGER',      # Explorer of the Seas
     'AD':  'VOYAGER',      # Adventure of the Seas
-    'NA':  'VOYAGER',      # Navigator of the Seas
+    'NV':  'VOYAGER',      # Navigator of the Seas
     'MA':  'VOYAGER',      # Mariner of the Seas
     # Radiance class
     'RD':  'RADIANCE',     # Radiance of the Seas
@@ -121,128 +173,6 @@ def getShips(brand="royal"):
 
 
 ##########
-# Get Sailings
-
-def getSailings(shipCode, resultSet=300):
-    """Return list of sail-date strings (YYYYMMDD) for the given ship."""
-    params = {'resultSet': str(resultSet)}
-    try:
-        response = requests.get(
-            f'https://api.rccl.com/en/royal/mobile/v3/ships/{shipCode}/voyages',
-            params=params,
-            headers=MOBILE_HEADERS,
-        )
-        response.raise_for_status()
-    except Exception as e:
-        print(f"Can't contact cruise line servers; please try again later\n(program exception '{e}')")
-        exit(1)
-
-    voyages = response.json().get("payload", {}).get("voyages", [])
-    sailings = []
-    for voyage in voyages:
-        sailDate = voyage.get("sailDate")
-        description = voyage.get("voyageDescription", "")
-        if sailDate:
-            sailings.append({'date': sailDate, 'description': description})
-    return sailings
-
-
-##########
-# Search cruise prices via GraphQL
-
-def searchCruisePrices(packageCode, sailDate, numAdults, numChildren, currency):
-    """
-    Query the Royal Caribbean GraphQL search API for a specific sailing.
-    Returns a list of dicts: {cabinClass, cabinType, pricePerPerson, totalPrice}
-    """
-    filterString = (
-        f"id:{packageCode}"
-        f"|adults:{numAdults}"
-        f"|children:{numChildren}"
-        f"|startDate:{sailDate}~{sailDate}"
-    )
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'content-type': 'application/json',
-        'brand': 'R',
-        'country': 'USA',
-        'language': 'en',
-        'currency': currency,
-        'office': 'MIA',
-        'countryalpha2code': 'US',
-        'apollographql-client-name': 'rci-NextGen-Cruise-Search',
-        'skip_authentication': 'true',
-        'request-timeout': '20',
-        'apollographql-query-name': 'cruiseSearch_Cruises',
-        'Origin': 'https://www.royalcaribbean.com',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-    }
-
-    json_data = {
-        'operationName': 'cruiseSearch_Cruises',
-        'variables': {
-            'filters': filterString,
-            'enableNewCasinoExperience': False,
-            'sort': {'by': 'RECOMMENDED'},
-            'pagination': {'count': 100, 'skip': 0},
-        },
-        'query': (
-            'query cruiseSearch_Cruises($filters: String) {'
-            'cruiseSearch(filters: $filters) {'
-            'results {cruises {id sailings {sailDate stateroomClassPricing {'
-            'price {value currency { code }} '
-            'stateroomClass {id name content { code }}'
-            '}}}}}}'  
-        ),
-    }
-
-    try:
-        resp = requests.post(
-            'https://www.royalcaribbean.com/cruises/graph',
-            headers=headers,
-            json=json_data,
-            timeout=20,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        return None  # silently skip on error
-
-    data = resp.json().get("data")
-    if not data:
-        return None
-
-    results = data.get("cruiseSearch", {}).get("results", {}).get("cruises", [])
-    if not results:
-        return None
-
-    sailings_data = results[0].get("sailings", [])
-    prices = []
-    for sailing in sailings_data:
-        sd = sailing.get("sailDate", "").replace("-", "")
-        if sd != sailDate:
-            continue
-        for stateroom in sailing.get("stateroomClassPricing", []):
-            price_info = stateroom.get("price")
-            if price_info is None:
-                continue
-            cabin_class = stateroom["stateroomClass"]["content"]["code"]
-            cabin_type = stateroom["stateroomClass"]["name"]
-            price_per_person = float(price_info["value"])
-            total = round(price_per_person * (numAdults + numChildren), 2)
-            prices.append({
-                'cabinClass': cabin_class,
-                'cabinType': cabin_type,
-                'pricePerPerson': price_per_person,
-                'totalPrice': total,
-                'currency': price_info["currency"]["code"],
-            })
-    return prices if prices else None
-
-
 ##########
 # Get voyages with package codes via the search API (one call per ship/date range)
 
@@ -350,6 +280,7 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
                     'totalPrice': total,
                     'currency': price_info["currency"]["code"],
                     'nights': nights,
+                    'departurePort': _port_from_package_code(package_code),
                 })
     return results
 
@@ -368,13 +299,14 @@ def collectCruiseResults(
     minNights=None,
     maxNights=None,
     minShipClass=None,
+    departurePorts=None,    # list/set of 3-letter port codes to include (e.g. ['FLL', 'MIA'])
     status_callback=None,   # callable(msg: str) for progress reporting
     ships_override=None,    # pre-fetched ship list (avoids extra API call)
 ):
     """
     Fetch all matching sailings and return a sorted list of result dicts.
     Each dict contains: sailDate, packageCode, bookingCode, cabinClass, cabinType,
-    pricePerPerson, totalPrice, currency, nights, shipCode, shipName.
+    pricePerPerson, totalPrice, currency, nights, shipCode, shipName, departurePort.
 
     status_callback(msg) is called with progress strings so callers (CLI or
     Streamlit) can display them however they like.
@@ -457,6 +389,8 @@ def collectCruiseResults(
                 continue
             if maxNights is not None and (v.get('nights') is None or v['nights'] > maxNights):
                 continue
+            if departurePorts and v.get('departurePort') not in departurePorts:
+                continue
             key = (v['sailDate'], v['packageCode'])
             if key not in best_by_date or v['totalPrice'] < best_by_date[key]['totalPrice']:
                 best_by_date[key] = v
@@ -502,6 +436,7 @@ def findCheapestCruises(
     minNights=None,
     maxNights=None,
     minShipClass=None,
+    departurePorts=None,
 ):
     all_results = collectCruiseResults(
         numAdults=numAdults,
@@ -514,6 +449,7 @@ def findCheapestCruises(
         minNights=minNights,
         maxNights=maxNights,
         minShipClass=minShipClass,
+        departurePorts=departurePorts,
         status_callback=lambda msg: print(msg),
     )
 
@@ -540,6 +476,8 @@ def findCheapestCruises(
         nights_str = f"{r['nights']}nt" if r.get('nights') else "?nt"
         ship_cls = get_ship_class(r['shipCode']) or "?"
         desc = r.get('description') or ''
+        port_code = r.get('departurePort') or ''
+        port_name = PORT_CODE_TO_NAME.get(port_code, port_code)
         print(
             f"  #{shown+1:>3}  {display_date}  {r['shipName']:<35}"
             f"  [{ship_cls:<12}]  {r['cabinType']:<20}"
@@ -548,6 +486,8 @@ def findCheapestCruises(
         )
         if desc:
             print(f"         {desc}")
+        if port_name:
+            print(f"         Departs: {port_name}")
         print(f"         Book at: {_make_booking_url(r, numAdults, numChildren)}")
         shown += 1
 
@@ -652,6 +592,16 @@ def main():
         metavar='FORMAT',
         help='Date display format (e.g. %%m/%%d/%%Y). Defaults to locale format.',
     )
+    parser.add_argument(
+        '-p', '--port',
+        type=str,
+        default=None,
+        metavar='PORT[,PORT...]',
+        help=(
+            'Filter by departure port code(s), comma-separated (e.g. FLL or FLL,MIA). '
+            'Known codes: ' + ', '.join(f'{k}={v}' for k, v in PORT_CODE_TO_NAME.items())
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -659,6 +609,10 @@ def main():
         dateDisplayFormat = args.date_format
 
     min_ship_class = args.min_ship_class.replace('-', ' ') if args.min_ship_class else None
+    departure_ports = (
+        [p.strip().upper() for p in args.port.split(',') if p.strip()]
+        if args.port else None
+    )
 
     findCheapestCruises(
         numAdults=args.adults,
@@ -672,6 +626,7 @@ def main():
         minNights=args.min_nights,
         maxNights=args.max_nights,
         minShipClass=min_ship_class,
+        departurePorts=departure_ports,
     )
 
 
