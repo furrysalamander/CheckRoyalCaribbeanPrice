@@ -1,3 +1,5 @@
-Apprise
-bs4
-pyinstaller
+streamlit
+plotly
+pandas
+numpy
+requests
