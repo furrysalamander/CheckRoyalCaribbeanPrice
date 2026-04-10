@@ -63,6 +63,129 @@ PORT_CODE_TO_NAME = {
     'HNL': 'Honolulu, HI',
     'STH': 'Southampton, England',
     'SWD': 'Seward, AK',
+    'IST': 'Istanbul, Turkey',
+    'RVN': 'Ravenna (Venice), Italy',
+    'TRS': 'Trieste, Italy',
+}
+
+# Departure ports grouped by region (matches Royal Caribbean's website layout).
+# Values are port codes from PORT_CODE_TO_NAME.
+PORT_REGIONS = {
+    'North America': [
+        'BAL', 'BWI', 'BYI',       # Baltimore
+        'BYE', 'NWK',              # Cape Liberty / New York area
+        'FLL',                      # Fort Lauderdale
+        'GAL',                      # Galveston
+        'LAX',                      # Los Angeles
+        'MIA',                      # Miami
+        'NOS', 'MSY',              # New Orleans
+        'HNL',                      # Oahu (Honolulu)
+        'ORL', 'PCP',              # Port Canaveral (Orlando)
+        'SAN',                      # San Diego
+        'SWD', 'ANC',              # Seward / Alaska
+        'SEA',                      # Seattle
+        'TPA',                      # Tampa
+        'VAN', 'YVR',              # Vancouver
+        'BOS',                      # Boston
+        'JAX',                      # Jacksonville
+    ],
+    'Europe': [
+        'ATH',                      # Athens (Piraeus)
+        'BCN',                      # Barcelona
+        'COP',                      # Copenhagen
+        'AMS',                      # Amsterdam
+        'IST',                      # Istanbul
+        'RVN',                      # Ravenna (Venice)
+        'ROM',                      # Rome (Civitavecchia)
+        'STH',                      # Southampton
+        'TRS',                      # Trieste
+    ],
+    'Australia': [
+        'BNE',                      # Brisbane
+        'SYD',                      # Sydney
+    ],
+    'Latin America & Caribbean': [
+        'CTG',                      # Cartagena
+        'ONX',                      # Colón, Panama
+        'SJU',                      # San Juan, PR
+    ],
+    'Asia & The Pacific': [
+        'HKG',                      # Hong Kong
+        'SHI', 'BAO',              # Shanghai
+        'SIN',                      # Singapore
+    ],
+}
+
+# Map itinerary descriptions to destination regions via keyword matching.
+# Order matters — first match wins, so put more specific keywords before general ones.
+DESTINATION_KEYWORDS = [
+    ('Alaska',                  ['alaska']),
+    ('Asia',                    ['japan', 'china', 'southeast asia', 'asia']),
+    ('Australia & New Zealand', ['australia', 'new zealand']),
+    ('Bahamas',                 ['bahamas', 'cococay']),
+    ('Bermuda',                 ['bermuda']),
+    ('Canada & New England',    ['canada', 'new england']),
+    ('Caribbean',               ['caribbean', 'perfect day']),
+    ('Europe',                  ['mediterranean', 'greek isles', 'italy', 'spain',
+                                 'norway', 'nordic', 'baltic', 'british isles',
+                                 'europe', 'adriatic', 'aegean']),
+    ('Hawaii',                  ['hawaii', 'hawaiian']),
+    ('Mexico',                  ['mexican riviera', 'mexico', 'baja', 'cabo',
+                                 'mazatlan', 'ensenada', 'vallarta', 'cozumel',
+                                 'costa maya']),
+    ('Pacific Northwest',       ['pacific northwest']),
+    ('Panama Canal',            ['panama canal']),
+    ('Repositioning',           ['repositioning']),
+    ('South Pacific',           ['south pacific']),
+    ('Transatlantic',           ['transatlantic']),
+    ('Transpacific',            ['transpacific']),
+]
+
+
+def classify_destination(description):
+    """Classify an itinerary description into a destination region name."""
+    if not description:
+        return 'Other'
+    desc_lower = description.lower()
+    for region, keywords in DESTINATION_KEYWORDS:
+        for kw in keywords:
+            if kw in desc_lower:
+                return region
+    return 'Other'
+
+
+# Ship code → full ship name (for UI display when API list isn't available)
+SHIP_CODE_TO_NAME = {
+    'IC': 'Icon of the Seas',
+    'ST': 'Star of the Seas',
+    'LG': 'Legend of the Seas',
+    'OA': 'Oasis of the Seas',
+    'AL': 'Allure of the Seas',
+    'HM': 'Harmony of the Seas',
+    'SY': 'Symphony of the Seas',
+    'WN': 'Wonder of the Seas',
+    'UT': 'Utopia of the Seas',
+    'OY': 'Odyssey of the Seas',
+    'SC': 'Spectrum of the Seas',
+    'QN': 'Quantum of the Seas',
+    'AN': 'Anthem of the Seas',
+    'OV': 'Ovation of the Seas',
+    'FR': 'Freedom of the Seas',
+    'LB': 'Liberty of the Seas',
+    'IN': 'Independence of the Seas',
+    'VY': 'Voyager of the Seas',
+    'EX': 'Explorer of the Seas',
+    'AD': 'Adventure of the Seas',
+    'NV': 'Navigator of the Seas',
+    'MA': 'Mariner of the Seas',
+    'RD': 'Radiance of the Seas',
+    'BR': 'Brilliance of the Seas',
+    'SR': 'Serenade of the Seas',
+    'JW': 'Jewel of the Seas',
+    'GR': 'Grandeur of the Seas',
+    'RH': 'Rhapsody of the Seas',
+    'EN': 'Enchantment of the Seas',
+    'VI': 'Vision of the Seas',
 }
 
 MOBILE_HEADERS = {
@@ -71,6 +194,15 @@ MOBILE_HEADERS = {
     'appversion': '1.54.0',
     'accept-language': 'en',
     'user-agent': 'okhttp/4.10.0',
+}
+
+# Cabin class hierarchy ordered from cheapest (0) to most expensive (3).
+# The API returns single-letter codes (I, O, B, D); UI uses full names.
+CABIN_CLASS_RANK = {
+    'INTERIOR': 0, 'I': 0,
+    'OUTSIDE':  1, 'O': 1,
+    'BALCONY':  2, 'B': 2,
+    'SUITE':    3, 'D': 3,
 }
 
 # Ship class hierarchy ordered from smallest (0) to largest (7).
@@ -176,21 +308,20 @@ def getShips(brand="royal"):
 ##########
 # Get voyages with package codes via the search API (one call per ship/date range)
 
-def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildren, currency, cabinClass=None):
+def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildren, currency, minCabinClass=None):
     """
     Use the GraphQL cruise search to discover packageCodes for a given ship
     across a date range, then return per-sailing pricing.
     Returns list of dicts: {sailDate, description, packageCode, cabinClass, cabinType,
                              pricePerPerson, totalPrice, currency}
     """
+    min_cabin_rank = CABIN_CLASS_RANK.get(minCabinClass) if minCabinClass else None
     filterString = (
         f"ship:{shipCode}"
         f"|adults:{numAdults}"
         f"|children:{numChildren}"
         f"|startDate:{fromDate}~{toDate}"
     )
-    if cabinClass:
-        filterString += f"|cabinClassType:{cabinClass}"
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
@@ -264,8 +395,8 @@ def getVoyagesWithPackageCodes(shipCode, fromDate, toDate, numAdults, numChildre
                     continue
                 cc = stateroom["stateroomClass"]["content"]["code"]
                 ct = stateroom["stateroomClass"]["name"]
-                # Client-side cabin class filter — the API returns all classes
-                if cabinClass and cc != cabinClass:
+                # Client-side cabin class filter — skip classes below minimum
+                if min_cabin_rank is not None and CABIN_CLASS_RANK.get(cc, -1) < min_cabin_rank:
                     continue
                 ppp = float(price_info["value"])
                 total = round(ppp * (numAdults + numChildren), 2)
@@ -292,7 +423,7 @@ def collectCruiseResults(
     numAdults=4,
     numChildren=0,
     currency='USD',
-    cabinClass=None,
+    minCabinClass=None,
     fromDate=None,
     toDate=None,
     shipCode=None,
@@ -361,7 +492,7 @@ def collectCruiseResults(
         f"Searching {len(ships)} ship(s) for cheapest cruises for {numAdults} adults"
         + (f" + {numChildren} children" if numChildren else "")
         + f" ({currency})"
-        + (f" in {cabinClass}" if cabinClass else "")
+        + (f", cabin >= {minCabinClass}" if minCabinClass else "")
         + nights_filter
         + class_filter
         + f" between {fromDate} and {toDate}"
@@ -375,7 +506,7 @@ def collectCruiseResults(
         _log(f"Searching {sn} ({sc})...")
 
         voyages = getVoyagesWithPackageCodes(
-            sc, fromDate, toDate, numAdults, numChildren, currency, cabinClass
+            sc, fromDate, toDate, numAdults, numChildren, currency, minCabinClass
         )
 
         if not voyages:
@@ -428,7 +559,7 @@ def findCheapestCruises(
     numAdults=4,
     numChildren=0,
     currency='USD',
-    cabinClass=None,
+    minCabinClass=None,
     fromDate=None,
     toDate=None,
     topN=10,
@@ -442,7 +573,7 @@ def findCheapestCruises(
         numAdults=numAdults,
         numChildren=numChildren,
         currency=currency,
-        cabinClass=cabinClass,
+        minCabinClass=minCabinClass,
         fromDate=fromDate,
         toDate=toDate,
         shipCode=shipCode,
@@ -531,7 +662,7 @@ def main():
         type=str,
         default=None,
         choices=['INTERIOR', 'OUTSIDE', 'BALCONY', 'SUITE'],
-        help='Restrict results to a specific cabin class (default: any)',
+        help='Minimum cabin class to include (default: any). INTERIOR < OUTSIDE < BALCONY < SUITE.',
     )
     parser.add_argument(
         '-f', '--from-date',
@@ -618,7 +749,7 @@ def main():
         numAdults=args.adults,
         numChildren=args.children,
         currency=args.currency,
-        cabinClass=args.cabin_class,
+        minCabinClass=args.cabin_class,
         fromDate=args.from_date,
         toDate=args.to_date,
         topN=args.top,

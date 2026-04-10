@@ -13,8 +13,13 @@ from FindCheapestCruise import (
     collectCruiseResults,
     getShips,
     get_ship_class,
+    CABIN_CLASS_RANK,
     SHIP_CLASS_RANK,
+    SHIP_CODE_TO_CLASS,
+    SHIP_CODE_TO_NAME,
     PORT_CODE_TO_NAME,
+    PORT_REGIONS,
+    classify_destination,
     _make_booking_url,
 )
 
@@ -40,7 +45,7 @@ num_children = st.sidebar.number_input("Children", min_value=0, max_value=10, va
 currency = st.sidebar.text_input("Currency", value="USD").upper()
 
 cabin_class_options = ["Any", "INTERIOR", "OUTSIDE", "BALCONY", "SUITE"]
-cabin_class_sel = st.sidebar.selectbox("Cabin Class", cabin_class_options)
+cabin_class_sel = st.sidebar.selectbox("Minimum Cabin Class", cabin_class_options)
 cabin_class = None if cabin_class_sel == "Any" else cabin_class_sel
 
 today = datetime.today().date()
@@ -48,23 +53,101 @@ from_date = st.sidebar.date_input("From Date", value=today)
 to_date = st.sidebar.date_input("To Date", value=today + timedelta(days=365))
 
 col1, col2 = st.sidebar.columns(2)
-min_nights = col1.number_input("Min Nights", min_value=0, max_value=30, value=0)
-max_nights = col2.number_input("Max Nights", min_value=0, max_value=60, value=0)
+min_nights = col1.number_input("Min Nights", min_value=0, max_value=30, value=0, help="0 = no limit")
+max_nights = col2.number_input("Max Nights", min_value=0, max_value=60, value=0, help="0 = no limit")
 min_nights = min_nights if min_nights > 0 else None
 max_nights = max_nights if max_nights > 0 else None
 
-ship_class_choices = ["Any"] + list(SHIP_CLASS_RANK.keys())
-min_ship_class_sel = st.sidebar.selectbox(
-    "Min Ship Class",
-    ship_class_choices,
-    help="Ship classes ordered smallest → largest: " + " < ".join(SHIP_CLASS_RANK.keys()),
-)
-min_ship_class = None if min_ship_class_sel == "Any" else min_ship_class_sel
+# ── Departure Port selector (grouped by region) ──────────────────────────────
 
-ship_code_input = st.sidebar.text_input(
-    "Specific Ship Code (optional)",
-    placeholder="e.g. WN, OY",
-).strip().upper() or None
+st.sidebar.markdown("---")
+st.sidebar.subheader("Departure Ports")
+st.sidebar.caption("Leave all unchecked to search every port.")
+
+# Pre-compute child keys per region for the select-all callbacks
+_port_child_keys: dict[str, list[str]] = {}
+for region_name, port_codes in PORT_REGIONS.items():
+    seen_names: dict[str, list[str]] = {}
+    for pc in port_codes:
+        name = PORT_CODE_TO_NAME.get(pc, pc)
+        seen_names.setdefault(name, []).append(pc)
+    _port_child_keys[region_name] = [f"port_{'_'.join(codes)}" for codes in seen_names.values()]
+
+def _toggle_port_region(region_name: str):
+    val = st.session_state[f"port_region_all_{region_name}"]
+    for ck in _port_child_keys[region_name]:
+        st.session_state[ck] = val
+
+_selected_port_codes: set[str] = set()
+
+for region_name, port_codes in PORT_REGIONS.items():
+    seen_names: dict[str, list[str]] = {}
+    for pc in port_codes:
+        name = PORT_CODE_TO_NAME.get(pc, pc)
+        seen_names.setdefault(name, []).append(pc)
+
+    with st.sidebar.expander(region_name):
+        all_key = f"port_region_all_{region_name}"
+        st.checkbox(
+            f"Select all {region_name}", key=all_key,
+            on_change=_toggle_port_region, args=(region_name,),
+        )
+
+        for display_name, codes in seen_names.items():
+            cb_key = f"port_{'_'.join(codes)}"
+            checked = st.checkbox(display_name, key=cb_key)
+            if checked:
+                _selected_port_codes.update(codes)
+
+_departure_ports = _selected_port_codes if _selected_port_codes else None
+
+# ── Ship selector (grouped by class) ─────────────────────────────────────────
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Ships")
+st.sidebar.caption("Leave all unchecked to search every ship.")
+
+# Pre-fetch ship list so we can display real names
+_all_ships = cached_get_ships()
+
+# Build class → ships mapping, ordered largest class first
+_ships_by_class: dict[str, list[dict]] = {}
+for cls_name in sorted(SHIP_CLASS_RANK, key=SHIP_CLASS_RANK.get, reverse=True):
+    ships_in_class = [s for s in _all_ships if (SHIP_CODE_TO_CLASS.get(s['code'], '').upper() == cls_name)]
+    if ships_in_class:
+        _ships_by_class[cls_name] = sorted(ships_in_class, key=lambda s: s['name'])
+
+# Pre-compute child keys per ship class for the select-all callbacks
+_ship_child_keys: dict[str, list[str]] = {}
+for cls_name, ships_in_class in _ships_by_class.items():
+    _ship_child_keys[cls_name] = [f"ship_{ship['code']}" for ship in ships_in_class]
+
+def _toggle_ship_class(cls_name: str):
+    val = st.session_state[f"ship_class_all_{cls_name}"]
+    for ck in _ship_child_keys[cls_name]:
+        st.session_state[ck] = val
+
+_selected_ship_codes: set[str] = set()
+
+for cls_name, ships_in_class in _ships_by_class.items():
+    with st.sidebar.expander(f"{cls_name.title()} Class ({len(ships_in_class)})"):
+        all_key = f"ship_class_all_{cls_name}"
+        st.checkbox(
+            f"Select all {cls_name.title()}", key=all_key,
+            on_change=_toggle_ship_class, args=(cls_name,),
+        )
+
+        for ship in ships_in_class:
+            cb_key = f"ship_{ship['code']}"
+            checked = st.checkbox(ship['name'], key=cb_key)
+            if checked:
+                _selected_ship_codes.add(ship['code'])
+
+# Build the filtered ship list for the search
+if _selected_ship_codes:
+    _ships_override = [s for s in _all_ships if s['code'] in _selected_ship_codes]
+else:
+    _ships_override = _all_ships
 
 search_button = st.sidebar.button("🔍 Search", use_container_width=True, type="primary")
 
@@ -81,20 +164,7 @@ if search_button:
         log_messages.append(msg)
 
     with st.status("Searching for cruises…", expanded=True) as status_box:
-        # Pre-fetch (and cache) ship list so we can show progress counts
-        if ship_code_input:
-            ships_list = None  # collectCruiseResults will resolve it
-        else:
-            st.write("Loading ship list…")
-            ships_list = cached_get_ships()
-
-            # Apply ship-class filter for the progress display
-            if min_ship_class:
-                min_rank = SHIP_CLASS_RANK.get(min_ship_class.upper(), -1)
-                from FindCheapestCruise import ship_class_rank
-                ships_list = [s for s in ships_list if ship_class_rank(s['code']) >= min_rank]
-
-            st.write(f"Searching {len(ships_list)} ship(s)…")
+        st.write(f"Searching {len(_ships_override)} ship(s)…")
 
         progress_placeholder = st.empty()
         collected_msgs = []
@@ -107,15 +177,14 @@ if search_button:
             numAdults=num_adults,
             numChildren=num_children,
             currency=currency,
-            cabinClass=cabin_class,
+            minCabinClass=cabin_class,
             fromDate=from_date.strftime("%Y-%m-%d"),
             toDate=to_date.strftime("%Y-%m-%d"),
-            shipCode=ship_code_input,
             minNights=min_nights,
             maxNights=max_nights,
-            minShipClass=min_ship_class,
+            departurePorts=_departure_ports,
             status_callback=live_callback,
-            ships_override=ships_list,
+            ships_override=_ships_override,
         )
 
         if results:
@@ -145,26 +214,45 @@ if not results:
 
 # ── Post-search filters ───────────────────────────────────────────────────────
 
-# Departure port multiselect — populated from actual search results so the user
-# only sees ports that have sailings.  Defaults to all ports selected.
-_all_ports = sorted({r.get('departurePort') for r in results if r.get('departurePort')})
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filter Results")
-selected_ports = st.sidebar.multiselect(
-    "Departure Port",
-    options=_all_ports,
-    default=_all_ports,
-    format_func=lambda p: f"{p} — {PORT_CODE_TO_NAME.get(p, p)}",
-    help="Narrows the chart and table without re-running the search.",
+use_per_person = st.sidebar.toggle("Show per-person prices on heatmap", value=False)
+
+# Destination region filter — classify each result and let user narrow down
+for r in results:
+    r['_destRegion'] = classify_destination(r.get('description', ''))
+
+_all_regions = sorted({r['_destRegion'] for r in results})
+
+# Pre-compute child keys for destination region select-all callback
+_dest_child_keys = [f"dest_region_{rn}" for rn in _all_regions]
+
+def _toggle_dest_regions():
+    val = st.session_state["dest_region_all"]
+    for ck in _dest_child_keys:
+        st.session_state[ck] = val
+
+st.sidebar.markdown("Destination Region")
+st.sidebar.checkbox(
+    "Select all", key="dest_region_all", value=True,
+    on_change=_toggle_dest_regions,
 )
+selected_regions: set[str] = set()
+for rn in _all_regions:
+    cb_key = f"dest_region_{rn}"
+    # Default to checked (True) so all regions show initially
+    if cb_key not in st.session_state:
+        st.session_state.setdefault(cb_key, True)
+    if st.sidebar.checkbox(rn, key=cb_key):
+        selected_regions.add(rn)
 
 filtered_results = [
     r for r in results
-    if not selected_ports or r.get('departurePort') in selected_ports
+    if not selected_regions or r.get('_destRegion') in selected_regions
 ]
 
 if not filtered_results:
-    st.warning("No sailings match the selected departure port(s).")
+    st.warning("No sailings match the selected filters.")
     st.stop()
 
 # ── Build pivot for heatmap ───────────────────────────────────────────────────
@@ -178,10 +266,14 @@ df["nights"] = df["nights"].fillna(0).astype(int)
 # Bucket each sailing into the Monday-starting week for wider, cleaner cells
 df["sailWeek"] = df["sailDateParsed"] - pd.to_timedelta(df["sailDateParsed"].dt.dayofweek, unit="D")
 
-# For each (sailWeek, nights) cell keep the cheapest total price
+# Select which price column to visualize
+_price_col = "pricePerPerson" if use_per_person else "totalPrice"
+_price_label = "Per Person" if use_per_person else "Total Price"
+
+# For each (sailWeek, nights) cell keep the cheapest price
 pivot_src = (
     df.groupby(["sailWeek", "nights"])
-    .agg(totalPrice=("totalPrice", "min"))
+    .agg(displayPrice=(_price_col, "min"))
     .reset_index()
 )
 
@@ -212,7 +304,7 @@ hover_grid = pd.DataFrame(index=all_nights, columns=all_weeks, dtype=object)
 for _, row in pivot_src.iterrows():
     w = row["sailWeek"]
     n = row["nights"]
-    price_grid.at[n, w] = row["totalPrice"]
+    price_grid.at[n, w] = row["displayPrice"]
     details = hover_details.get((w, n), [])
     hover_grid.at[n, w] = "<br>".join(details)
 
@@ -244,12 +336,12 @@ fig = go.Figure(
         colorscale="RdYlGn_r",   # red = expensive, green = cheap
         zmin=zmin_val,
         zmax=zmax_val,
-        colorbar=dict(title=f"Total Price ({params['currency']})"),
+        colorbar=dict(title=f"{_price_label} ({params['currency']})"),
         hoverongaps=False,
         text=hover_text,
         hovertemplate=(
             "Week of <b>%{x}</b> &nbsp;|&nbsp; <b>%{y}</b><br>"
-            "Cheapest: <b>%{z:,.0f} " + params["currency"] + "</b><br>"
+            f"{_price_label}: " + "<b>%{z:,.0f} " + params["currency"] + "</b><br>"
             "%{text}<extra></extra>"
         ),
         xgap=1,
@@ -260,7 +352,7 @@ fig = go.Figure(
 fig.update_layout(
     title=dict(
         text=(
-            f"Cruise Prices — {params['numAdults']} adult(s)"
+            f"Cruise Prices ({_price_label}) — {params['numAdults']} adult(s)"
             + (f" + {params['numChildren']} child(ren)" if params['numChildren'] else "")
             + f"  |  {params['currency']}"
         ),
@@ -276,11 +368,11 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ── Results table ─────────────────────────────────────────────────────────────
 
-_port_note = (
-    f" — {len(results)} total before port filter"
+_filter_note = (
+    f" — {len(results)} total before filters"
     if len(filtered_results) != len(results) else ""
 )
-st.subheader(f"All Results ({len(filtered_results)} sailings{_port_note})")
+st.subheader(f"All Results ({len(filtered_results)} sailings{_filter_note})")
 
 table_rows = []
 for r in filtered_results:
@@ -307,13 +399,20 @@ for r in filtered_results:
 
 table_df = pd.DataFrame(table_rows)
 
+st.download_button(
+    label="📥 Download CSV",
+    data=table_df.to_csv(index=False),
+    file_name="cruise_results.csv",
+    mime="text/csv",
+)
+
 st.dataframe(
     table_df,
     use_container_width=True,
     hide_index=True,
     column_config={
-        "Total Price": st.column_config.NumberColumn(format="$%.2f"),
-        "Per Person":  st.column_config.NumberColumn(format="$%.2f"),
+        "Total Price": st.column_config.NumberColumn(format="%.2f"),
+        "Per Person":  st.column_config.NumberColumn(format="%.2f"),
         "Book":        st.column_config.LinkColumn("Book", display_text="Book →"),
     },
 )
