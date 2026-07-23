@@ -2,9 +2,9 @@
 *
 
 # Include only essential files
-!CheckRoyalCaribbeanPrice.py
+!FindCheapestCruise_app.py
+!FindCheapestCruise.py
 !requirements.txt
-!entrypoint.sh
 
 # Exclude common development files
 .git
